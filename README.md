@@ -1,81 +1,106 @@
-# omabright (Omarchy/Hyprland per-monitor brightness)
+# omabright
 
-Goal: wherever your mouse cursor is, your laptop brightness keys adjust that monitor.
+Per-monitor brightness control for Omarchy/Hyprland. Your brightness keys automatically adjust whichever monitor your cursor is on.
+
+## Features
+
+- **Cursor-aware brightness**: Brightness keys adjust the monitor under your cursor
+- **Laptop display**: Native backlight control via `brightnessctl`
+- **External monitors**: Hardware brightness via DDC/CI (`ddcutil`)
+- **Software fallback**: Hyprland `sdrBrightness` when DDC/CI is unavailable
+- **Visual feedback**: On-screen display (OSD) shows brightness changes on the target monitor
+- **Daemon architecture**: Socket-based IPC for instant response
 
 ## Requirements
 
-- Required: `hyprctl`, `brightnessctl`, `systemd --user`
-- External monitors (recommended): `ddcutil` (DDC/CI for real monitor brightness)
-  - Commonly also needed: allow your user to access `/dev/i2c-*` (e.g. udev `uaccess` or `i2c` group)
-- OSD (enabled by default): `swayosd-client` (ships with Omarchy; shows the bar on the target monitor)
+**Core dependencies:**
+- `hyprctl` (Hyprland compositor)
+- `brightnessctl` (laptop backlight control)
+- `systemd --user` (daemon management)
+
+**External monitor support (recommended):**
+- `ddcutil` — DDC/CI protocol for hardware brightness control
+- User access to `/dev/i2c-*` devices (via udev `uaccess` tag or `i2c` group membership)
+
+**On-screen display (enabled by default):**
+- `swayosd-client` — ships with Omarchy, displays brightness bar on the active monitor
 
 ## External Monitor Fallback
 
-Not every monitor/dock/adapter path supports DDC/CI reliably. When DDC is unavailable, `omabright` falls back to Hyprland `sdrBrightness` (software dimming, not the monitor backlight).
+Not all monitors, docks, or adapters support DDC/CI reliably. When hardware brightness control is unavailable, `omabright` automatically falls back to Hyprland's `sdrBrightness` (software-based dimming).
 
-- Range is controlled by `sdr_min/sdr_max` in `~/.config/omabright/config.json` (default `0.2..1.0`)
-- If the image looks wrong, run `omabright reset` to reset external monitors' `sdrBrightness`
+**Configuration:**
+- Brightness range: `sdr_min` / `sdr_max` in `~/.config/omabright/config.json` (default: `0.2` to `1.0`)
+- Reset if needed: `omabright reset` restores external monitors to full brightness (`sdrBrightness = 1.0`)
 
 ## Quick Start
 
-1) Create default config (optional)
+**1. Create default configuration (optional)**
 
 ```bash
 omabright init
 ```
 
-2) Start the daemon (foreground)
+**2. Start the daemon**
 
 ```bash
 omabright daemon
 ```
 
-3) Test from another terminal
+**3. Test brightness control** (from another terminal)
 
 ```bash
-omabright status
-omabright up
-omabright down
+omabright status    # Show current monitor and brightness
+omabright up        # Increase brightness
+omabright down      # Decrease brightness
 ```
 
 ## systemd User Service (Recommended)
 
-1) Install to `~/.local/bin` and write the user service
+**1. Install the service**
 
 ```bash
 omabright install
 ```
 
-2) Enable and start
+This installs `omabright` to `~/.local/bin` and creates the systemd user service.
+
+**2. Enable and start**
 
 ```bash
 systemctl --user enable --now omabright.service
 ```
 
-## Hyprland Brightness Keybinds (Example)
+## Hyprland Keybinds
 
-Omarchy binds brightness keys to `omarchy-brightness-display` by default. In your `~/.config/hypr/bindings.conf`, `unbind` first and rebind to `omabright`:
+Omarchy binds brightness keys to `omarchy-brightness-display` by default. To use `omabright` instead, add this to your `~/.config/hypr/bindings.conf`:
 
-```
+```conf
+# Unbind default Omarchy brightness handler
 unbind = , XF86MonBrightnessUp
 unbind = , XF86MonBrightnessDown
 unbind = ALT, XF86MonBrightnessUp
 unbind = ALT, XF86MonBrightnessDown
 
-bindeld = , XF86MonBrightnessUp, Brightness up (cursor monitor), exec, omabright up
-bindeld = , XF86MonBrightnessDown, Brightness down (cursor monitor), exec, omabright down
-bindeld = ALT, XF86MonBrightnessUp, Brightness up precise (cursor monitor), exec, omabright up --step 1
-bindeld = ALT, XF86MonBrightnessDown, Brightness down precise (cursor monitor), exec, omabright down --step 1
+# Bind to omabright (cursor-aware brightness)
+bindel = , XF86MonBrightnessUp, exec, omabright up
+bindel = , XF86MonBrightnessDown, exec, omabright down
+bindel = ALT, XF86MonBrightnessUp, exec, omabright up --step 1
+bindel = ALT, XF86MonBrightnessDown, exec, omabright down --step 1
 ```
 
-## DDC Mapping
+The `ALT` variants use `--step 1` for fine-grained control.
 
-When `ddcutil` is available, the daemon maps Hyprland outputs (e.g. `HDMI-A-1`) to `ddcutil` I2C buses automatically:
+## DDC/CI Mapping
 
-- Prefer mapping via `DRM connector` from `ddcutil detect --brief`
-- If needed, pin a mapping in `~/.config/omabright/config.json` using `ddc_overrides`
+When `ddcutil` is available, the daemon automatically maps Hyprland outputs (e.g., `HDMI-A-1`) to DDC/CI I2C buses:
 
-## Files
+- **Automatic detection**: Matches outputs via DRM connector information from `ddcutil detect --brief`
+- **Manual override**: Pin specific mappings in `~/.config/omabright/config.json` using the `ddc_overrides` field
 
-- `bin/omabright`: single-file script (daemon + client)
-- `systemd/omabright.service`: user service template (`omabright install` installs to `~/.config/systemd/user/`)
+This ensures brightness commands target the correct physical monitor.
+
+## Project Structure
+
+- `bin/omabright` — Single-file script (daemon + client)
+- `systemd/omabright.service` — systemd user service template (installed to `~/.config/systemd/user/` via `omabright install`)
