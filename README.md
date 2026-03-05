@@ -1,93 +1,107 @@
 # omabright
 
-Per-monitor brightness control for Omarchy/Hyprland. Your brightness keys automatically adjust whichever monitor your cursor is on.
+Per-monitor brightness control for Omarchy/Hyprland.
+Brightness keys always target the monitor under your cursor.
 
-## Features
+## What It Does
 
-- **Cursor-aware brightness**: Brightness keys adjust the monitor under your cursor
-- **Laptop display**: Native backlight control via `brightnessctl`
-- **External monitors**: Hardware brightness via DDC/CI (`ddcutil`)
-- **Software fallback**: Hyprland `sdrBrightness` when DDC/CI is unavailable
-- **Visual feedback**: On-screen display (OSD) shows brightness changes on the target monitor
-- **Daemon architecture**: Socket-based IPC for instant response
+- Cursor-aware brightness routing across multiple monitors
+- Native laptop backlight control via `brightnessctl`
+- External monitor hardware brightness via DDC/CI (`ddcutil`)
+- Automatic SDR fallback (`sdrBrightness`) when DDC is unavailable
+- Fast daemon + socket IPC for low-latency key-repeat handling
+- OSD feedback via `swayosd-client` (default) or `notify-send`
 
-## Requirements
+## Runtime Requirements
 
-**Core dependencies:**
-- `hyprctl` (Hyprland compositor)
-- `brightnessctl` (laptop backlight control)
-- `systemd --user` (daemon management)
+`omabright` must run inside an active Hyprland graphical session.
+Running in headless or non-Hyprland environments is not supported for functional validation.
 
-**External monitor support (recommended):**
-- `ddcutil` — DDC/CI protocol for hardware brightness control
-- User access to `/dev/i2c-*` devices (via udev `uaccess` tag or `i2c` group membership)
+Core dependencies:
+- `hyprctl`
+- `brightnessctl`
+- `systemd --user`
 
-**On-screen display (enabled by default):**
-- `swayosd-client` — ships with Omarchy, displays brightness bar on the active monitor
+Optional but recommended for external monitors:
+- `ddcutil`
+- Access to `/dev/i2c-*` (via `uaccess` or `i2c` group)
 
-## External Monitor Fallback
+Optional OSD:
+- `swayosd-client`
 
-Not all monitors, docks, or adapters support DDC/CI reliably. When hardware brightness control is unavailable, `omabright` automatically falls back to Hyprland's `sdrBrightness` (software-based dimming).
+## Agent-First Install (Recommended)
 
-If `ddcutil detect --brief` reports an output as `Invalid display` (common with some docks), `omabright` now treats that path as non-DDC and goes directly to SDR fallback to avoid repeated timeouts.
-
-**Configuration:**
-- Brightness range: `sdr_min` / `sdr_max` in `~/.config/omabright/config.json` (default: `0.2` to `1.0`)
-- Reset if needed: `omabright reset` restores external monitors to full brightness (`sdrBrightness = 1.0`)
-
-## Quick Start
-
-**1. Create default configuration (optional)**
+Run from a repository checkout:
 
 ```bash
-omabright init
+REPO_DIR="/path/to/omarchy_display_brightness"
+cd "$REPO_DIR"
 ```
 
-**2. Start the daemon**
+Preflight checks (fail early):
 
 ```bash
-omabright daemon
+command -v hyprctl brightnessctl systemctl python3 >/dev/null
+test -n "${XDG_RUNTIME_DIR:-}"
+test -n "${WAYLAND_DISPLAY:-}"
 ```
 
-**3. Test brightness control** (from another terminal)
+If `ddcutil` is installed, external-monitor hardware brightness can be used.
+Without `ddcutil`, external monitors use SDR fallback.
+
+Install and start:
 
 ```bash
-omabright status    # Show current monitor and brightness
-omabright up        # Increase brightness
-omabright down      # Decrease brightness
-```
-
-## systemd User Service (Recommended)
-
-**1. Install the service**
-
-```bash
-omabright install
-```
-
-This installs `omabright` to `~/.local/bin` and creates the systemd user service.
-
-**2. Enable and start**
-
-```bash
+./bin/omabright install
+systemctl --user daemon-reload
 systemctl --user enable --now omabright.service
 ```
 
-The service is attached to `graphical-session.target`, so it starts only after the graphical session is ready and stops on logout.
+Notes:
+- `./bin/omabright install` installs the executable to `~/.local/bin/omabright`
+- It also installs the service file to `~/.config/systemd/user/omabright.service`
+- Service is attached to `graphical-session.target` to avoid early-start race issues
 
-**Upgrade existing installs**
+## Agent Verification (Machine-Checkable)
 
-If you installed an older version, reinstall the service template and reload systemd:
+A successful install should satisfy all checks below:
 
 ```bash
-omabright install
-systemctl --user daemon-reload
-systemctl --user restart omabright.service
+systemctl --user is-active omabright.service
+~/.local/bin/omabright ping
+~/.local/bin/omabright status
+~/.local/bin/omabright list
+```
+
+Strict pass/fail assertions:
+
+```bash
+test "$(systemctl --user is-active omabright.service)" = "active"
+~/.local/bin/omabright ping | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("ok") is True'
+~/.local/bin/omabright status | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("ok") is True; assert d.get("backend") in {"backlight","ddc","sdr"}'
+~/.local/bin/omabright list | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("ok") is True; ms=d.get("monitors"); assert isinstance(ms,list) and len(ms)>=1; assert all(m.get("backend") in {"backlight","ddc","sdr"} for m in ms)'
+```
+
+## Manual Debug Mode
+
+Use foreground daemon mode only for debugging:
+
+```bash
+./bin/omabright daemon
+```
+
+This blocks the terminal. Run client commands from another shell:
+
+```bash
+./bin/omabright status
+./bin/omabright up
+./bin/omabright down
 ```
 
 ## Hyprland Keybinds
 
-Omarchy binds brightness keys to `omarchy-brightness-display` by default. To use `omabright` instead, add this to your `~/.config/hypr/bindings.conf`:
+Omarchy binds brightness keys to `omarchy-brightness-display` by default.
+To use `omabright`, add this to `~/.config/hypr/bindings.conf`:
 
 ```conf
 # Unbind default Omarchy brightness handler
@@ -103,28 +117,61 @@ bindel = ALT, XF86MonBrightnessUp, exec, omabright up --step 1
 bindel = ALT, XF86MonBrightnessDown, exec, omabright down --step 1
 ```
 
-The `ALT` variants use `--step 1` for fine-grained control.
+## External Monitor Behavior
 
-## DDC/CI Mapping
+Not all monitors, docks, and adapters support DDC/CI reliably.
 
-When `ddcutil` is available, the daemon automatically maps Hyprland outputs (e.g., `HDMI-A-1`) to DDC/CI I2C buses:
+- If DDC works, `omabright` uses hardware brightness (`ddcutil`)
+- If DDC is unavailable, `omabright` falls back to Hyprland SDR brightness
+- If `ddcutil detect --brief` reports an output as `Invalid display` (common on some docks), `omabright` treats that path as non-DDC and directly uses SDR fallback to avoid repeated timeouts
 
-- **Automatic detection**: Matches outputs via DRM connector information from `ddcutil detect --brief`
-- **Manual override**: Pin specific mappings in `~/.config/omabright/config.json` using the `ddc_overrides` field
+SDR fallback configuration in `~/.config/omabright/config.json`:
+- `sdr_min` / `sdr_max` (default `0.2` to `1.0`)
+- `sdr_fallback_enabled` (default `true`)
 
-This ensures brightness commands target the correct physical monitor.
+Reset SDR brightness for external monitors:
 
-## Project Structure
+```bash
+omabright reset
+```
 
-- `bin/omabright` — Single-file script (daemon + client)
-- `systemd/omabright.service` — systemd user service template (installed to `~/.config/systemd/user/` via `omabright install`)
+## DDC Mapping
+
+When `ddcutil` is available, connector-to-bus mapping is maintained automatically.
+
+- Automatic mapping: DRM connector names from `ddcutil detect --brief`
+- Manual override: `ddc_overrides` in `~/.config/omabright/config.json`
 
 ## Troubleshooting
 
-**Brightness keys do nothing**
+Brightness keys do nothing:
 
-- Verify keybinds: `hyprctl binds | rg -n "XF86MonBrightness|omabright"`
-- Verify daemon: `systemctl --user status omabright.service`
-- Verify IPC: `omabright ping`
+```bash
+hyprctl binds | rg -n "XF86MonBrightness|omabright"
+systemctl --user status omabright.service
+omabright ping
+```
 
-If this still fails right after login, run `omabright install` and restart the user service to pick up the latest unit and startup-race fixes.
+Dock-connected monitor does not change hardware brightness:
+
+```bash
+ddcutil detect --brief
+```
+
+If the output is `Invalid display`, that connector path does not support reliable DDC.
+Use SDR fallback (default) or change cable/dock path.
+
+DDC permission problems:
+
+```bash
+ls -l /dev/i2c-*
+id
+groups
+```
+
+After changing permissions or group membership, re-login and test again.
+
+## Project Structure
+
+- `bin/omabright`: single-file daemon + client CLI
+- `systemd/omabright.service`: user service template
