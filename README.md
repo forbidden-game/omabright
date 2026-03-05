@@ -71,6 +71,18 @@ This installs `omabright` to `~/.local/bin` and creates the systemd user service
 systemctl --user enable --now omabright.service
 ```
 
+The service is attached to `graphical-session.target`, so it starts only after the graphical session is ready and stops on logout.
+
+**Upgrade existing installs**
+
+If you installed an older version, reinstall the service template and reload systemd:
+
+```bash
+omabright install
+systemctl --user daemon-reload
+systemctl --user restart omabright.service
+```
+
 ## Hyprland Keybinds
 
 Omarchy binds brightness keys to `omarchy-brightness-display` by default. To use `omabright` instead, add this to your `~/.config/hypr/bindings.conf`:
@@ -104,3 +116,13 @@ This ensures brightness commands target the correct physical monitor.
 
 - `bin/omabright` — Single-file script (daemon + client)
 - `systemd/omabright.service` — systemd user service template (installed to `~/.config/systemd/user/` via `omabright install`)
+
+## Troubleshooting
+
+**Brightness keys do nothing**
+
+- Verify keybinds: `hyprctl binds | rg -n "XF86MonBrightness|omabright"`
+- Verify daemon: `systemctl --user status omabright.service`
+- Verify IPC: `omabright ping`
+
+If this still fails right after login, run `omabright install` and restart the user service to pick up the latest unit and startup-race fixes.

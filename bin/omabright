@@ -25,12 +25,13 @@ from pathlib import Path
 from typing import Any, Optional
 
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 CONNECTOR_RE = re.compile(r"^(?!card\d+-)[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*-\d+$")
 SYSTEMD_SERVICE_TEMPLATE = """\
 [Unit]
 Description=Omabright daemon (per-monitor brightness for Hyprland)
 After=graphical-session.target
+PartOf=graphical-session.target
 
 [Service]
 Type=simple
@@ -39,8 +40,12 @@ Restart=on-failure
 RestartSec=1
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target
 """
+
+HYPR_SIG_CACHE_TTL_S = 5.0
+_HYPR_SIG_CACHE: Optional[str] = None
+_HYPR_SIG_CACHE_AT = 0.0
 
 
 def eprint(*args: object) -> None:
@@ -130,14 +135,85 @@ def which(cmd: str) -> Optional[str]:
     return shutil.which(cmd)
 
 
-def run_capture(cmd: list[str], timeout_s: float = 3.0) -> str:
+def run_capture(cmd: list[str], timeout_s: float = 3.0, *, env: Optional[dict[str, str]] = None) -> str:
     # Intentionally uses subprocess (sync); should be fast for hyprctl/brightnessctl.
-    out = subprocess.check_output(cmd, timeout=timeout_s)
+    out = subprocess.check_output(cmd, timeout=timeout_s, env=env)
     return out.decode(errors="replace")
 
 
-def run_check(cmd: list[str], timeout_s: float = 5.0) -> None:
-    subprocess.check_call(cmd, timeout=timeout_s)
+def run_check(cmd: list[str], timeout_s: float = 5.0, *, env: Optional[dict[str, str]] = None) -> None:
+    subprocess.check_call(cmd, timeout=timeout_s, env=env)
+
+
+def guess_hyprland_instance_signature(force_refresh: bool = False) -> Optional[str]:
+    global _HYPR_SIG_CACHE
+    global _HYPR_SIG_CACHE_AT
+
+    now = time.monotonic()
+    if not force_refresh and _HYPR_SIG_CACHE and (now - _HYPR_SIG_CACHE_AT) <= HYPR_SIG_CACHE_TTL_S:
+        return _HYPR_SIG_CACHE
+
+    best_sig: Optional[str] = None
+    best_mtime = -1.0
+    hypr_dir = runtime_dir() / "hypr"
+    try:
+        for child in hypr_dir.iterdir():
+            if not child.is_dir():
+                continue
+            sock = child / ".socket.sock"
+            if not sock.exists():
+                continue
+            try:
+                mtime = sock.stat().st_mtime
+            except OSError:
+                continue
+            if mtime > best_mtime:
+                best_mtime = mtime
+                best_sig = child.name
+    except FileNotFoundError:
+        best_sig = None
+    except Exception:
+        best_sig = None
+
+    _HYPR_SIG_CACHE = best_sig
+    _HYPR_SIG_CACHE_AT = now
+    return best_sig
+
+
+def hyprctl_env(force_refresh: bool = False) -> dict[str, str]:
+    env = os.environ.copy()
+    if force_refresh or not env.get("HYPRLAND_INSTANCE_SIGNATURE"):
+        sig = guess_hyprland_instance_signature(force_refresh=force_refresh)
+        if sig:
+            env["HYPRLAND_INSTANCE_SIGNATURE"] = sig
+    return env
+
+
+def run_hyprctl_capture(args: list[str], timeout_s: float = 3.0) -> str:
+    cmd = ["hyprctl", *args]
+    env1 = hyprctl_env(force_refresh=False)
+    try:
+        return run_capture(cmd, timeout_s=timeout_s, env=env1)
+    except subprocess.CalledProcessError:
+        # Retry once after forcing signature refresh. This avoids startup races
+        # where systemd starts the daemon before HYPRLAND_INSTANCE_SIGNATURE is imported.
+        env2 = hyprctl_env(force_refresh=True)
+        if env2.get("HYPRLAND_INSTANCE_SIGNATURE") != env1.get("HYPRLAND_INSTANCE_SIGNATURE"):
+            return run_capture(cmd, timeout_s=timeout_s, env=env2)
+        raise
+
+
+def run_hyprctl_check(args: list[str], timeout_s: float = 5.0) -> None:
+    cmd = ["hyprctl", *args]
+    env1 = hyprctl_env(force_refresh=False)
+    try:
+        run_check(cmd, timeout_s=timeout_s, env=env1)
+    except subprocess.CalledProcessError:
+        env2 = hyprctl_env(force_refresh=True)
+        if env2.get("HYPRLAND_INSTANCE_SIGNATURE") != env1.get("HYPRLAND_INSTANCE_SIGNATURE"):
+            run_check(cmd, timeout_s=timeout_s, env=env2)
+            return
+        raise
 
 
 @dataclasses.dataclass(frozen=True)
@@ -169,7 +245,7 @@ class HyprMonitor:
 
 
 def hypr_cursorpos() -> tuple[int, int]:
-    s = run_capture(["hyprctl", "cursorpos"]).strip()
+    s = run_hyprctl_capture(["cursorpos"]).strip()
     # e.g. "4783, 809"
     m = re.match(r"^\s*(\d+)\s*,\s*(\d+)\s*$", s)
     if not m:
@@ -178,7 +254,7 @@ def hypr_cursorpos() -> tuple[int, int]:
 
 
 def hypr_monitors() -> list[HyprMonitor]:
-    raw = run_capture(["hyprctl", "-j", "monitors"], timeout_s=3.0)
+    raw = run_hyprctl_capture(["-j", "monitors"], timeout_s=3.0)
     data = json.loads(raw)
     mons: list[HyprMonitor] = []
     if not isinstance(data, list):
@@ -670,7 +746,7 @@ class OmabrightDaemon:
         if self.dry_run:
             eprint(f"[omabright] dry_run: hyprctl keyword monitor {spec!r}")
             return
-        run_check(["hyprctl", "keyword", "monitor", spec], timeout_s=3.0)
+        run_hyprctl_check(["keyword", "monitor", spec], timeout_s=3.0)
 
     async def status(self, *, monitor_name: Optional[str] = None) -> dict[str, Any]:
         cursor = hypr_cursorpos()
