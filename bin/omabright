@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 
-VERSION = "0.2.1"
+VERSION = "0.2.2"
 CONNECTOR_RE = re.compile(r"^(?!card\d+-)[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*-\d+$")
 SYSTEMD_SERVICE_TEMPLATE = """\
 [Unit]
@@ -517,16 +517,20 @@ class OmabrightDaemon:
     async def refresh_ddc(self) -> dict[str, Any]:
         if not (self.ddc_enabled and ddcutil_available()):
             self.ddc_displays = []
+            self.ddc_by_connector = {}
             return {"ddc_available": False, "displays": []}
         # detect can be slow; run in thread
         displays = await asyncio.to_thread(ddcutil_detect)
         self.ddc_displays = displays
         self.ddc_by_connector = {d.connector: d for d in displays if d.connector}
-        # Update mapping cache from DRM connector name when available.
-        # Also prune any stale/bad keys from older versions.
-        self.ddc_map = {k: v for k, v in self.ddc_map.items() if CONNECTOR_RE.match(k)}
+        # Update mapping cache from valid DRM connector names only.
+        # Also prune stale keys and connectors known to be invalid on this path.
+        invalid_connectors = {d.connector for d in displays if d.connector and not d.valid}
+        self.ddc_map = {
+            k: v for k, v in self.ddc_map.items() if CONNECTOR_RE.match(k) and k not in invalid_connectors
+        }
         for d in displays:
-            if d.connector and CONNECTOR_RE.match(d.connector):
+            if d.valid and d.connector and CONNECTOR_RE.match(d.connector):
                 self.ddc_map[d.connector] = d.bus
         self._save_map_cache()
 
@@ -543,6 +547,9 @@ class OmabrightDaemon:
         # 2) cached mapping
         # 3) heuristic match from latest detect
         name = mon.name
+        disp = self.ddc_by_connector.get(name)
+        if disp and not disp.valid:
+            return None
         if name in self.ddc_overrides:
             try:
                 return int(self.ddc_overrides[name])
@@ -552,7 +559,7 @@ class OmabrightDaemon:
             return self.ddc_map[name]
         # If we have a current detection snapshot, prefer mapping by connector name.
         for d in self.ddc_displays:
-            if d.connector and d.connector == name:
+            if d.valid and d.connector and d.connector == name:
                 self.ddc_map[name] = d.bus
                 self._save_map_cache()
                 return d.bus
@@ -782,6 +789,16 @@ class OmabrightDaemon:
 
         if not self.ddc_displays:
             await self.refresh_ddc()
+        disp = self.ddc_by_connector.get(mon.name)
+        if disp and not disp.valid:
+            if self.sdr_fallback_enabled:
+                res["backend"] = "sdr"
+                res["sdr_brightness"] = mon.sdr_brightness
+                res["sdr_saturation"] = mon.sdr_saturation
+                res["range"] = {"min": self.sdr_min, "max": self.sdr_max}
+                return res
+            res["error"] = "ddc unsupported on this connector path"
+            return res
         bus = self._resolve_ddc_bus(mon)
         if bus is not None:
             st = await self._ddc_ensure_state(bus)
@@ -826,7 +843,11 @@ class OmabrightDaemon:
                 item["backend"] = "backlight"
                 item["device"] = self.backlight_device
             else:
-                bus = self._resolve_ddc_bus(m) if (self.ddc_enabled and ddcutil_available()) else None
+                disp = self.ddc_by_connector.get(m.name) if (self.ddc_enabled and ddcutil_available()) else None
+                if disp and not disp.valid:
+                    bus = None
+                else:
+                    bus = self._resolve_ddc_bus(m) if (self.ddc_enabled and ddcutil_available()) else None
                 if bus is not None:
                     item["backend"] = "ddc"
                     item["bus"] = bus

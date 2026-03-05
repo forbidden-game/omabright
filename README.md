@@ -29,6 +29,8 @@ Per-monitor brightness control for Omarchy/Hyprland. Your brightness keys automa
 
 Not all monitors, docks, or adapters support DDC/CI reliably. When hardware brightness control is unavailable, `omabright` automatically falls back to Hyprland's `sdrBrightness` (software-based dimming).
 
+If `ddcutil detect --brief` reports an output as `Invalid display` (common with some docks), `omabright` now treats that path as non-DDC and goes directly to SDR fallback to avoid repeated timeouts.
+
 **Configuration:**
 - Brightness range: `sdr_min` / `sdr_max` in `~/.config/omabright/config.json` (default: `0.2` to `1.0`)
 - Reset if needed: `omabright reset` restores external monitors to full brightness (`sdrBrightness = 1.0`)
